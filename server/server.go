@@ -3846,16 +3846,73 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 	}
 	findings, _ := t.Store.ListByKind(db.KindFinding, 1000) // 纯漏洞（事实是独立的 KindFact，不进报告）
 	counts := map[string]int{}
-	for _, ty := range []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"} {
-		ns, _ := s.m.Assets().QueryByType(ty, 100000, 0)
-		if len(ns) > 0 {
-			counts[ty] = len(ns)
+	assetLabels := map[int64]string{}
+	assetIDs, err := strconv.ParseInt(t.ID, 10, 64)
+	if err == nil {
+		assets, assetErr := s.m.Assets().QueryByTask(assetIDs, "", 100000, 0)
+		if assetErr != nil {
+			log.Printf("[report] task assets task=%s: %v", t.ID, assetErr)
+		} else {
+			for _, asset := range assets {
+				counts[asset.Type]++
+				assetLabels[asset.ID] = assetLabel(asset)
+			}
 		}
 	}
-	md := report.Markdown(report.Input{
-		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
-		AssetCounts: counts, Findings: findings,
-	})
+	findingAssets := map[int64][]string{}
+	if len(findings) > 0 {
+		nodeIDs := make([]int64, 0, len(findings))
+		for _, finding := range findings {
+			nodeIDs = append(nodeIDs, finding.ID)
+		}
+		anchors, anchorErr := t.Store.NodeAssets(nodeIDs)
+		if anchorErr != nil {
+			log.Printf("[report] finding assets task=%s: %v", t.ID, anchorErr)
+		} else {
+			for nodeID, ids := range anchors {
+				for _, id := range ids {
+					if label := assetLabels[id]; label != "" {
+						findingAssets[nodeID] = append(findingAssets[nodeID], label)
+					}
+				}
+				sort.Strings(findingAssets[nodeID])
+			}
+		}
+	}
+	var scopes []db.TaskScope
+	if err == nil {
+		scopes, _ = s.m.Assets().ListTaskScope(assetIDs)
+	}
+	lifecycle := t.lifecycleSnapshot()
+	title := t.lifecycleSnapshot().Name
+	if strings.TrimSpace(title) == "" {
+		title = t.Description
+	}
+	in := report.Input{
+		Title: title, Goal: t.Goal, GeneratedAt: time.Now(), TaskStatus: s.resolvedTaskStatus(t),
+		AssetCounts: counts, Scopes: scopes, Findings: findings,
+		FindingAssets: findingAssets,
+	}
+	if lifecycle.FirstRunAt > 0 {
+		in.StartedAt = time.Unix(lifecycle.FirstRunAt, 0)
+	}
+	if lifecycle.CompletedAt > 0 {
+		in.CompletedAt = time.Unix(lifecycle.CompletedAt, 0)
+	}
+	if strings.EqualFold(r.URL.Query().Get("format"), "docx") {
+		content, err := report.DOCX(in)
+		if err != nil {
+			writeErr(w, 500, "generate Word report")
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="artex-task-%s-report.docx"`, t.ID))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+		return
+	}
+	md := report.Markdown(in)
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)
 	_, _ = w.Write([]byte(md))
