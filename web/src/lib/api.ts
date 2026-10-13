@@ -872,6 +872,17 @@ export const api = {
     if (!r.ok) throw new Error(`report: ${r.status}`);
     return r.text();
   },
+  reportDocx: async (task?: string) => {
+    if (MOCK) throw new Error("演示模式暂不支持 Word 报告下载");
+    const query = new URLSearchParams({ format: "docx" });
+    if (task) query.set("task", task);
+    const token = getToken();
+    const r = await fetch(`/api/report?${query.toString()}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!r.ok) throw new Error(`Word 报告下载失败：${r.status}`);
+    return r.blob();
+  },
   chatMentions: (kind: string, query: string, signal?: AbortSignal, cursor = "") =>
     http<{ items: ChatMention[]; next_cursor?: string }>(
       `/chat/mentions?${new URLSearchParams({ kind, q: query, cursor })}`,
